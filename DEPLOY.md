@@ -3,7 +3,7 @@
 
 ## BEFORE YOU START — collect these:
 # [ ] AWS account (free at aws.amazon.com)
-# [ ] Anthropic API key — platform.anthropic.com → API Keys
+# [ ] OpenAI API key — platform.openai.com → API keys
 # [ ] Stripe account — stripe.com (use Test mode first, go live later)
 # [ ] A domain name (optional but recommended — e.g. zimtender.co.zw from Domains.co.zw)
 # [ ] GitHub account (free)
@@ -64,7 +64,7 @@ sam deploy --guided
 # Answer the prompts like this:
 #   Stack Name: zimtender-production
 #   AWS Region: us-east-1
-#   AnthropicApiKey: sk-ant-YOUR_KEY_HERE
+#   OpenAIApiKey: sk-proj-YOUR_KEY_HERE
 #   StripeSecretKey: sk_test_YOUR_KEY_HERE
 #   StripeWebhookSecret: whsec_YOUR_SECRET_HERE
 #   StripePriceId: price_YOUR_PRICE_ID
@@ -187,7 +187,7 @@ sam build && sam deploy
 # All other costs (Cognito free tier, Lambda pay-per-use, DynamoDB pay-per-request)
 # scale only when you have revenue.
 
-# Anthropic API cost per generation: ~$0.05-0.10 (Claude Sonnet, 4000 tokens)
+# OpenAI API cost per generation: depends on selected model and token usage (for example, GPT-4o mini is typically low-cost for this workload).
 # So 100 generations/month = ~$5-10 in API costs
 # At $39/user, break-even is easily covered.
 

@@ -1,14 +1,13 @@
-const Anthropic = require("@anthropic-ai/sdk");
-const { GetCommand, UpdateCommand, QueryCommand } = require("@aws-sdk/lib-dynamodb");
+const OpenAI = require("openai");
+const { GetCommand, UpdateCommand } = require("@aws-sdk/lib-dynamodb");
 const { PutObjectCommand } = require("@aws-sdk/client-s3");
 const {
   Document, Packer, Paragraph, TextRun, HeadingLevel,
-  AlignmentType, BorderStyle, Table, TableRow, TableCell,
-  WidthType, ShadingType,
+  AlignmentType,
 } = require("docx");
 const { dynamo, s3, ok, err, getUserId } = require("../lib/utils");
 
-const anthropic = new Anthropic.default({ apiKey: process.env.ANTHROPIC_API_KEY });
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 const checkAccess = async (userId) => {
   const result = await dynamo.send(new GetCommand({
@@ -196,13 +195,14 @@ exports.handler = async (event) => {
   }));
 
   const prompt = buildPrompt(company, tender);
-  const message = await anthropic.messages.create({
-    model: "claude-sonnet-4-5-20251022",
-    max_tokens: 4000,
-    messages: [{ role: "user", content: prompt }],
+  const response = await openai.responses.create({
+    model: "gpt-4o-mini",
+    max_output_tokens: 4000,
+    input: [{ role: "user", content: [{ type: "input_text", text: prompt }] }],
   });
 
-  const content = message.content[0].text;
+  const content = response.output_text;
+  if (!content) return err("Failed to generate tender response", 500);
 
   const docBuffer = await buildDocx(company, tender, content);
   const documentKey = `documents/${userId}/${tenderId}/response_${Date.now()}.docx`;

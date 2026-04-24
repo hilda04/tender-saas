@@ -1,0 +1,10 @@
+{
+  "name": "zimtender",
+  "version": "1.0.0",
+  "private": true,
+  "description": "ZimTender — AI-powered tender response assistant for Zimbabwe",
+  "scripts": {
+    "deploy:backend": "cd backend/src && npm install && cd ../.. && sam build && sam deploy",
+    "deploy:backend:guided": "cd backend/src && npm install && cd ../.. && sam build && sam deploy --guided"
+  }
+}

@@ -1,0 +1,433 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  ZimTender - AI-powered Tender Response Assistant
+  Deploy with: sam build && sam deploy --guided
+
+Globals:
+  Function:
+    Runtime: nodejs20.x
+    Timeout: 30
+    MemorySize: 256
+    Environment:
+      Variables:
+        USERS_TABLE: !Ref UsersTable
+        COMPANIES_TABLE: !Ref CompaniesTable
+        TENDERS_TABLE: !Ref TendersTable
+        DOCUMENTS_BUCKET: !Ref DocumentsBucket
+        USER_POOL_ID: !Ref UserPool
+        USER_POOL_CLIENT_ID: !Ref UserPoolClient
+        ANTHROPIC_API_KEY: !Ref AnthropicApiKey
+        STRIPE_SECRET_KEY: !Ref StripeSecretKey
+        STRIPE_WEBHOOK_SECRET: !Ref StripeWebhookSecret
+        STRIPE_PRICE_ID: !Ref StripePriceId
+        FRONTEND_URL: !Ref FrontendUrl
+        CORS_ORIGIN: !Ref FrontendUrl
+
+Parameters:
+  AnthropicApiKey:
+    Type: String
+    NoEcho: true
+    Description: Your Anthropic Claude API key
+
+  StripeSecretKey:
+    Type: String
+    NoEcho: true
+    Description: Your Stripe secret key (sk_live_... or sk_test_...)
+
+  StripeWebhookSecret:
+    Type: String
+    NoEcho: true
+    Description: Stripe webhook signing secret (whsec_...)
+
+  StripePriceId:
+    Type: String
+    Description: Stripe Price ID for the $39/month plan (price_...)
+
+  FrontendUrl:
+    Type: String
+    Default: https://main.YOUR_AMPLIFY_ID.amplifyapp.com
+    Description: Your Amplify frontend URL (update after first deploy)
+
+  Environment:
+    Type: String
+    Default: production
+    AllowedValues: [production, staging]
+
+Resources:
+
+  # ─── API GATEWAY ───────────────────────────────────────────────────────────
+
+  TenderApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: v1
+      Cors:
+        AllowMethods: "'GET,POST,PUT,DELETE,OPTIONS'"
+        AllowHeaders: "'Content-Type,Authorization,X-Stripe-Signature'"
+        AllowOrigin: !Sub "'${FrontendUrl}'"
+      Auth:
+        DefaultAuthorizer: CognitoAuthorizer
+        Authorizers:
+          CognitoAuthorizer:
+            UserPoolArn: !GetAtt UserPool.Arn
+
+  # ─── COGNITO AUTH ──────────────────────────────────────────────────────────
+
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub zimtender-users-${Environment}
+      AutoVerifiedAttributes: [email]
+      UsernameAttributes: [email]
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Mutable: false
+          Required: true
+        - Name: subscription_status
+          AttributeDataType: String
+          Mutable: true
+      EmailConfiguration:
+        EmailSendingAccount: COGNITO_DEFAULT
+      UserPoolAddOns:
+        AdvancedSecurityMode: OFF
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: zimtender-web
+      UserPoolId: !Ref UserPool
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+        - ALLOW_USER_PASSWORD_AUTH
+      AccessTokenValidity: 24
+      IdTokenValidity: 24
+      RefreshTokenValidity: 30
+      TokenValidityUnits:
+        AccessToken: hours
+        IdToken: hours
+        RefreshToken: days
+      PreventUserExistenceErrors: ENABLED
+
+  # ─── DYNAMODB TABLES ───────────────────────────────────────────────────────
+
+  UsersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub zimtender-users-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: userId
+          AttributeType: S
+        - AttributeName: stripeCustomerId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: stripeCustomerId-index
+          KeySchema:
+            - AttributeName: stripeCustomerId
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  CompaniesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub zimtender-companies-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: companyId
+          AttributeType: S
+        - AttributeName: userId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: companyId
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: userId-index
+          KeySchema:
+            - AttributeName: userId
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+
+  TendersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub zimtender-tenders-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: tenderId
+          AttributeType: S
+        - AttributeName: userId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: tenderId
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: userId-index
+          KeySchema:
+            - AttributeName: userId
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+
+  # ─── S3 BUCKET ─────────────────────────────────────────────────────────────
+
+  DocumentsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub zimtender-docs-${AWS::AccountId}-${Environment}
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders: ['*']
+            AllowedMethods: [GET, PUT]
+            AllowedOrigins: [!Ref FrontendUrl]
+            MaxAge: 3000
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldDocuments
+            Status: Enabled
+            ExpirationInDays: 90
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  # ─── LAMBDA FUNCTIONS ──────────────────────────────────────────────────────
+
+  GetUserFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub zimtender-get-user-${Environment}
+      CodeUri: backend/src/users/
+      Handler: getUser.handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UsersTable
+      Events:
+        GetUser:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TenderApi
+            Path: /users/me
+            Method: GET
+
+  SaveCompanyFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub zimtender-save-company-${Environment}
+      CodeUri: backend/src/companies/
+      Handler: saveCompany.handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref CompaniesTable
+      Events:
+        SaveCompany:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TenderApi
+            Path: /companies
+            Method: POST
+        UpdateCompany:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TenderApi
+            Path: /companies/{companyId}
+            Method: PUT
+
+  GetCompanyFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub zimtender-get-company-${Environment}
+      CodeUri: backend/src/companies/
+      Handler: getCompany.handler
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref CompaniesTable
+      Events:
+        GetCompany:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TenderApi
+            Path: /companies
+            Method: GET
+
+  SaveTenderFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub zimtender-save-tender-${Environment}
+      CodeUri: backend/src/tenders/
+      Handler: saveTender.handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TendersTable
+      Events:
+        SaveTender:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TenderApi
+            Path: /tenders
+            Method: POST
+
+  ListTendersFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub zimtender-list-tenders-${Environment}
+      CodeUri: backend/src/tenders/
+      Handler: listTenders.handler
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref TendersTable
+      Events:
+        ListTenders:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TenderApi
+            Path: /tenders
+            Method: GET
+
+  GenerateResponseFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub zimtender-generate-${Environment}
+      CodeUri: backend/src/generate/
+      Handler: generate.handler
+      Timeout: 120
+      MemorySize: 512
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref UsersTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref CompaniesTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TendersTable
+        - S3WritePolicy:
+            BucketName: !Ref DocumentsBucket
+      Events:
+        Generate:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TenderApi
+            Path: /generate
+            Method: POST
+
+  CreateCheckoutFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub zimtender-checkout-${Environment}
+      CodeUri: backend/src/auth/
+      Handler: createCheckout.handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UsersTable
+      Events:
+        CreateCheckout:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TenderApi
+            Path: /billing/checkout
+            Method: POST
+
+  StripeWebhookFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub zimtender-stripe-webhook-${Environment}
+      CodeUri: backend/src/webhooks/
+      Handler: stripe.handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UsersTable
+      Events:
+        StripeWebhook:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TenderApi
+            Path: /webhooks/stripe
+            Method: POST
+            Auth:
+              Authorizer: NONE
+
+  GetDownloadUrlFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub zimtender-download-${Environment}
+      CodeUri: backend/src/tenders/
+      Handler: getDownloadUrl.handler
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref TendersTable
+        - S3ReadPolicy:
+            BucketName: !Ref DocumentsBucket
+      Events:
+        GetDownload:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TenderApi
+            Path: /tenders/{tenderId}/download
+            Method: GET
+
+  PostConfirmationTrigger:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub zimtender-post-confirm-${Environment}
+      CodeUri: backend/src/auth/
+      Handler: postConfirmation.handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UsersTable
+
+  UserPoolPostConfirmationTrigger:
+    Type: AWS::Cognito::UserPoolTrigger
+    DependsOn: PostConfirmationTriggerPermission
+    Properties:
+      UserPoolId: !Ref UserPool
+      TriggerType: PostConfirmation
+      FunctionArn: !GetAtt PostConfirmationTrigger.Arn
+
+  PostConfirmationTriggerPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt PostConfirmationTrigger.Arn
+      Principal: cognito-idp.amazonaws.com
+      SourceArn: !GetAtt UserPool.Arn
+
+Outputs:
+  ApiUrl:
+    Description: API Gateway endpoint
+    Value: !Sub https://${TenderApi}.execute-api.${AWS::Region}.amazonaws.com/v1
+    Export:
+      Name: !Sub ${AWS::StackName}-ApiUrl
+
+  UserPoolId:
+    Description: Cognito User Pool ID
+    Value: !Ref UserPool
+    Export:
+      Name: !Sub ${AWS::StackName}-UserPoolId
+
+  UserPoolClientId:
+    Description: Cognito User Pool Client ID
+    Value: !Ref UserPoolClient
+    Export:
+      Name: !Sub ${AWS::StackName}-UserPoolClientId
+
+  DocumentsBucket:
+    Description: S3 bucket for generated documents
+    Value: !Ref DocumentsBucket
